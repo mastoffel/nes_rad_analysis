@@ -2,3 +2,5 @@
 .Rhistory
 .RData
 data/
+filter_vcf_perl/
+plots/

@@ -3,10 +3,27 @@ library(vcfR)
 library(reshape2)
 library(ape)
 library(stringr)
-vcf_file <- "filtered_snps.recode.vcf"
-
+# vcf_file <- "data/filtered_snps.recode.vcf"
+vcf_file <- "data/final_all_merged.vcf"
 # read vcf
 nes <- read.vcfR(vcf_file, verbose = FALSE )
+dp <- extract.gt(nes_vcf, element = "DP", as.numeric = TRUE)
+
+# Reorganize and render violin plots.
+dpf <- melt(dp, varnames=c("Index", "Sample"), value.name = "Depth", na.rm=TRUE)
+dpf <- dpf[ dpf$Depth > 0,]
+p <- ggplot(dpf, aes(x=Sample, y=Depth)) + geom_violin(fill="#C0C0C0", adjust=1.0,scale = "count", trim=TRUE)
+
+p <- p + theme_bw()
+p <- p + ylab("Read Depth (DP)")
+p <- p + theme(axis.title.x = element_blank(),axis.text.x = element_text(angle = 60, hjust = 1))
+p <- p + stat_summary(fun.data=mean_sdl, geom="pointrange", color="black")
+p <- p + scale_y_continuous(trans=scales::log2_trans(), breaks=c(1, 10, 100, 1000))
+p
+# heatmap
+heatmap.bp(dp, rlabel = FALSE)
+
+# nes2 <- read.vcfR(vcf_file2, verbose = FALSE )
 # summary
 nes
 head(nes)
@@ -17,12 +34,15 @@ chrom <- create.chromR(name = 'supernes', vcf=nes)
 head(chrom)
 plot(chrom)
 # fixed <- chrom@vcf@fix
+chromoqc(chrom, dp.alpha = 22)
 
 # AN total number of alleles in called genotypes
 all_AN <- as.numeric(extract.info(chrom, "AN"))
 all_AF <- as.numeric(extract.info(chrom, "AF"))
+all_DP <- as.numeric(extract.info(chrom, "DP"))
 hist(all_AN)
 hist(all_AF)
+hist(all_DP, breaks = 200)
 
 gts <- chrom@vcf@gt
 # snps genotyped
@@ -35,20 +55,28 @@ head(nes)
 # extract fixed part of vcf
 fixed <- as.data.frame(chrom@vcf@fix, stringsAsFactors = FALSE)
 
-# split up information in INFO part into columns
-splitted_info <- str_split(fixed$INFO, ";")
-
-extract_INFO <- function(x) {
-    df <- as.data.frame(str_split(x, "="), stringsAsFactors = FALSE)
-    names(df) <- df[1, ]
-    out <- df[-1, ]
+extract_info <- function(element, vcfR){
+    element <- extract.info(vcfR, element = element, as.numeric = TRUE)
 }
 
-info_df <- lapply(splitted_info, extract_INFO)
-info_col_filt <- lapply(info_df, function(x) x[c("AF", "AN", "DP", "MQ")])
-
-info_all <- do.call(rbind, info_col_filt)
-info_all_num <- as.data.frame(apply(info_all, 2, as.numeric))
+info_df <- lapply(c("AF", "AN", "DP", "MQ"), extract_info, nes)
+info_df <- data.frame(do.call(cbind, info_df), stringsAsFactors = FALSE)
+names(info_df) <- c("AF", "AN", "DP", "MQ")
+info_all_num <- info_df
+# split up information in INFO part into columns
+# splitted_info <- str_split(fixed$INFO, ";")
+# 
+# extract_INFO <- function(x) {
+#     df <- as.data.frame(str_split(x, "="), stringsAsFactors = FALSE)
+#     names(df) <- df[1, ]
+#     out <- df[-1, ]
+# }
+# 
+# info_df <- lapply(splitted_info, extract_INFO)
+# info_col_filt <- lapply(info_df, function(x) x[c("AF", "AN", "DP", "MQ")])
+# 
+# info_all <- do.call(rbind, info_col_filt)
+# info_all_num <- as.data.frame(apply(info_all, 2, as.numeric))
 
 # create df with INFO in seperate columns
 snp_filter_df <- cbind(fixed, info_all_num)
@@ -62,10 +90,19 @@ no_multi_allel <- !((str_count(snp_filter_df$REF) > 1) | (str_count(snp_filter_d
 snps_filtered1 <- snp_filter_df[no_multi_allel, ]
 
 # filter AF 0 or 1
-polymorph <- !((snps_filtered1$AF == 1) | (snps_filtered1$AF == 0))
-snps_filtered2 <- snps_filtered1[polymorph, ]
-
+# calculate DP CI 95% and filter DP according to that
+# also filter MAF < 0.025
 library(dplyr)
+CI <- 0.95
+CI_DP <- stats::quantile(snps_filtered1$DP, c((1-CI)/2,1-(1-CI)/2), na.rm=TRUE)
+CI_AF <- stats::quantile(snps_filtered1$AF, c((1-CI)/2,1-(1-CI)/2), na.rm=TRUE)
+
+snps_filtered2 <- snps_filtered1 %>% 
+    filter(DP > CI_DP[1]) %>%
+    filter(DP < CI_DP[2]) %>%
+    filter(AF > 0.025) %>%
+    filter(AF < 0.975)
+
 # ###filter to get one snp per contig, the snp with the highest AN
 head(snps_filtered2)
 # filter for AN first, then for DP and then for the most left (min) position
@@ -76,30 +113,77 @@ snps_filtered3 <- snps_filtered2 %>%
                         filter(POS==min(POS))
 plot(snps_filtered3$DP)
 
-# calculate DP CI 95% and filter DP according to that
-# also filter MAF < 0.025
-CI <- 0.95
-CI_DP <- stats::quantile(snps_filtered3$DP, c((1-CI)/2,1-(1-CI)/2), na.rm=TRUE)
-CI_AF <- stats::quantile(snps_filtered3$AF, c((1-CI)/2,1-(1-CI)/2), na.rm=TRUE)
 
-snps_filtered4 <- snps_filtered3 %>% 
-                    filter(DP > CI_DP[1]) %>%
-                    filter(DP < CI_DP[2]) %>%
-                    filter(AF > 0.025) %>%
-                    filter(AF < 0.975)
+whitelist_snps <- snps_filtered3[c("CHROM", "POS")]
 
-whitelist_snps <- snps_filtered4[c("CHROM", "POS")]
-
-write.table(whitelist_snps, file = "whitelist_snps.txt", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(whitelist_snps, file = "data/whitelist_snps.txt", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
 
 ## command line filter initial vcf from whitelist
-# vcftools --vcf bcf_all_merged.vcf --out filtered_snps --positions whitelist_snps.txt --recode --recode-INFO-all
+# vcftools --vcf data/final_all_merged.vcf --out data/filtered_snps --positions data/whitelist_snps.txt --recode --recode-INFO-all
 
 
 
+### now filter for DP per sample with matrix
+
+# vcf_file <- "data/filtered_snps.recode.vcf"
+vcf_file <- "data/filtered_snps.recode.vcf"
+# read vcf
+nes <- read.vcfR(vcf_file, verbose = FALSE)
+dp <- extract.gt(nes, element = "DP", as.numeric = TRUE)
+
+dp_under_20 <- t(dp < 20)
+dp_under_10 <- t(dp < 10)
+dp_under_30 <- t(dp < 30)
+dp_under_5 <- t(dp < 5)
+sum(dp_under_10)
+
+# Reorganize and render violin plots.
+dpf <- melt(dp, varnames=c("Index", "Sample"), value.name = "Depth", na.rm=TRUE)
+dpf <- dpf[ dpf$Depth > 0,]
+p <- ggplot(dpf, aes(x=Sample, y=Depth)) + geom_violin(fill="#C0C0C0", adjust=1.0,scale = "count", trim=TRUE)
+
+p <- p + theme_bw()
+p <- p + ylab("Read Depth (DP)")
+p <- p + theme(axis.title.x = element_blank(),axis.text.x = element_text(angle = 60, hjust = 1))
+p <- p + stat_summary(fun.data=mean_sdl, geom="pointrange", color="black")
+p <- p + scale_y_continuous(trans=scales::log2_trans(), breaks=c(1, 10, 100, 1000))
+p
+# heatmap
+heatmap.bp(dp, rlabel = FALSE)
+
+# create genotypes
+
+gt <- extract.gt(nes, element = "GT")
+# transpose and data.frame
+#gt <- as.data.frame(t(gt), stringsAsFactors = FALSE)
+gt <- as.data.frame(gt, stringsAsFactors = FALSE)
+ind_names <- names(gt)
+gt <- t(gt)
+row.names(gt) <- ind_names
+# NA handling
+gt[gt == "./."] <- NA
+# split columns
+snp_geno <- do.call(cbind, apply(gt, 2, function(x) colsplit(x, "/", c("a","b"))))
+# convert
+snp_genotypes <- inbreedR::convert_raw(snp_geno)
 
 
 
+library(inbreedR)
+nes <- snp_genotypes
+nes[dp_under_5] <- NA
+# some checks
+typed <- rowSums(!is.na(nes))
+hist(typed)
+het <- MLH(nes)
+plot(het, typed)
+
+snp_geno_dp5 <- as.matrix(snp_genotypes)
+log_mat <- !(unname(as.matrix(dp_under_5)))
+rowSums(log_mat)
+# snp_geno_dp20[!log_mat] <- NA
+
+rowSums(!is.na(snp_genotypes))
 
 
 
@@ -191,7 +275,7 @@ chromoqc(chrom)
 chrom2 <- masker(chrom, min_MQ = 20, min_DP = 300)
 plot(chrom2)
 # extract genotypes
-gt <- extract.gt(vcf)
+gt <- extract.gt(nes)
 # transpose and data.frame
 gt <- as.data.frame(t(gt), stringsAsFactors = FALSE)
 # NA handling
